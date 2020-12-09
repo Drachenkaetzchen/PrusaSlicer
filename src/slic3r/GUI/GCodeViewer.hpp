@@ -1,7 +1,6 @@
 #ifndef slic3r_GCodeViewer_hpp_
 #define slic3r_GCodeViewer_hpp_
 
-#if ENABLE_GCODE_VIEWER
 #include "3DScene.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "GLModel.hpp"
@@ -24,6 +23,7 @@ class GCodeViewer
     static const std::vector<Color> Extrusion_Role_Colors;
     static const std::vector<Color> Options_Colors;
     static const std::vector<Color> Travel_Colors;
+    static const Color              Wipe_Color;
     static const std::vector<Color> Range_Colors;
 
     enum class EOptionsColors : unsigned char
@@ -327,6 +327,7 @@ class GCodeViewer
         long long render_paths_size{ 0 };
         // other
         long long travel_segments_count{ 0 };
+        long long wipe_segments_count{ 0 };
         long long extrude_segments_count{ 0 };
         long long max_vertices_in_vertex_buffer{ 0 };
         long long max_indices_in_index_buffer{ 0 };
@@ -361,6 +362,7 @@ class GCodeViewer
 
         void reset_others() {
             travel_segments_count = 0;
+            wipe_segments_count = 0;
             extrude_segments_count =  0;
             max_vertices_in_vertex_buffer = 0;
             max_indices_in_index_buffer = 0;
@@ -512,8 +514,6 @@ private:
 
 } // namespace GUI
 } // namespace Slic3r
-
-#endif // ENABLE_GCODE_VIEWER
 
 #endif // slic3r_GCodeViewer_hpp_
 

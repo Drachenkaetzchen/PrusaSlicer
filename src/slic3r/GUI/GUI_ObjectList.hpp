@@ -207,6 +207,7 @@ public:
     ObjectList(wxWindow* parent);
     ~ObjectList();
 
+    void set_min_height();
 
     std::map<std::string, wxBitmap> CATEGORY_ICON;
 
@@ -257,6 +258,8 @@ public:
     bool                paste_from_clipboard();
     void                undo();
     void                redo();
+    void                increase_instances();
+    void                decrease_instances();
 
     void                get_settings_choice(const wxString& category_name);
     void                get_freq_settings_choice(const wxString& bundle_name);
@@ -385,6 +388,7 @@ public:
     void update_selections();
     void update_selections_on_canvas();
     void select_item(const wxDataViewItem& item);
+    void select_item(std::function<wxDataViewItem()> get_item);
     void select_items(const wxDataViewItemArray& sels);
     void select_all();
     void select_item_all_children();

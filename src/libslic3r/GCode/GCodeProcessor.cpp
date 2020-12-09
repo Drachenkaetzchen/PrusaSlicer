@@ -25,6 +25,8 @@ static const float DEFAULT_ACCELERATION = 1500.0f; // Prusa Firmware 1_75mm_MK2
 namespace Slic3r {
 
 const std::string GCodeProcessor::Extrusion_Role_Tag = "TYPE:";
+const std::string GCodeProcessor::Wipe_Start_Tag     = "WIPE_START";
+const std::string GCodeProcessor::Wipe_End_Tag       = "WIPE_END";
 const std::string GCodeProcessor::Height_Tag         = "HEIGHT:";
 const std::string GCodeProcessor::Layer_Change_Tag   = "LAYER_CHANGE";
 const std::string GCodeProcessor::Color_Change_Tag   = "COLOR_CHANGE";
@@ -35,8 +37,16 @@ const std::string GCodeProcessor::First_Line_M73_Placeholder_Tag          = "; _
 const std::string GCodeProcessor::Last_Line_M73_Placeholder_Tag           = "; _GP_LAST_LINE_M73_PLACEHOLDER";
 const std::string GCodeProcessor::Estimated_Printing_Time_Placeholder_Tag = "; _GP_ESTIMATED_PRINTING_TIME_PLACEHOLDER";
 
+const float GCodeProcessor::Wipe_Width = 0.05f;
+const float GCodeProcessor::Wipe_Height = 0.05f;
+
+#if ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
+const std::string GCodeProcessor::Width_Tag = "WIDTH:";
+#endif // ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
+#if !ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
 const std::string GCodeProcessor::Width_Tag      = "WIDTH:";
+#endif // !ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
 const std::string GCodeProcessor::Mm3_Per_Mm_Tag = "MM3_PER_MM:";
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
 
@@ -394,7 +404,13 @@ void GCodeProcessor::TimeProcessor::post_process(const std::string& filename)
         // remove trailing '\n'
         assert(! gcode_line.empty());
         assert(gcode_line.back() == '\n');
-        return gcode_line.substr(0, gcode_line.length() - 1) == ";" + Layer_Change_Tag;
+
+        // return true for decorations which are used in processing the gcode but that should not be exported into the final gcode
+        // i.e.:
+        // bool ret = gcode_line.substr(0, gcode_line.length() - 1) == ";" + Layer_Change_Tag;
+        // ...
+        // return ret;
+        return false;
     };
 
     // Iterators for the normal and silent cached time estimate entry recently processed, used by process_line_G1.
@@ -486,7 +502,8 @@ const std::vector<std::pair<GCodeProcessor::EProducer, std::string>> GCodeProces
     { EProducer::Cura,        "Cura_SteamEngine" },
     { EProducer::Simplify3D,  "Simplify3D" },
     { EProducer::CraftWare,   "CraftWare" },
-    { EProducer::ideaMaker,   "ideaMaker" }
+    { EProducer::ideaMaker,   "ideaMaker" },
+    { EProducer::KissSlicer,  "KISSlicer" }
 };
 
 unsigned int GCodeProcessor::s_result_id = 0;
@@ -589,9 +606,6 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
         }
     }
 
-    // ensure at least one (default) color is defined
-    std::string default_color = "#FF8000";
-    m_result.extruder_colors = std::vector<std::string>(1, default_color);
     const ConfigOptionStrings* extruder_colour = config.option<ConfigOptionStrings>("extruder_colour");
     if (extruder_colour != nullptr) {
         // takes colors from config
@@ -606,7 +620,9 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
         }
     }
 
+
     // replace missing values with default
+    std::string default_color = "#FF8000";
     for (size_t i = 0; i < m_result.extruder_colors.size(); ++i) {
         if (m_result.extruder_colors[i].empty())
             m_result.extruder_colors[i] = default_color;
@@ -723,10 +739,15 @@ void GCodeProcessor::reset()
     m_end_position = { 0.0f, 0.0f, 0.0f, 0.0f };
     m_origin = { 0.0f, 0.0f, 0.0f, 0.0f };
     m_cached_position.reset();
+    m_wiping = false;
 
     m_feedrate = 0.0f;
     m_width = 0.0f;
     m_height = 0.0f;
+#if ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
+    m_forced_width = 0.0f;
+    m_forced_height = 0.0f;
+#endif // ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
     m_mm3_per_mm = 0.0f;
     m_fan_speed = 0.0f;
 
@@ -804,6 +825,14 @@ void GCodeProcessor::process_file(const std::string& filename, bool apply_postpr
         process_gcode_line(line);
         });
 
+    // update width/height of wipe moves
+    for (MoveVertex& move : m_result.moves) {
+        if (move.type == EMoveType::Wipe) {
+            move.width = Wipe_Width;
+            move.height = Wipe_Height;
+        }
+    }
+
     // process the time blocks
     for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedTimeStatistics::ETimeMode::Count); ++i) {
         TimeMachine& machine = m_time_processor.machines[i];
@@ -814,10 +843,6 @@ void GCodeProcessor::process_file(const std::string& filename, bool apply_postpr
     }
 
     update_estimated_times_stats();
-
-    // ensure at least one (default) color is defined
-    if (m_result.extruder_colors.empty())
-        m_result.extruder_colors.push_back("#FF8000");
 
     // post-process to add M73 lines into the gcode
     if (apply_postprocess)
@@ -1029,10 +1054,38 @@ void GCodeProcessor::process_tags(const std::string_view comment)
         return;
     }
 
+    // wipe start tag
+    if (starts_with(comment, Wipe_Start_Tag)) {
+        m_wiping = true;
+        return;
+    }
+
+    // wipe end tag
+    if (starts_with(comment, Wipe_End_Tag)) {
+        m_wiping = false;
+        return;
+    }
+
+#if ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
+    if (!m_producers_enabled || m_producer == EProducer::PrusaSlicer) {
+        // height tag
+        if (starts_with(comment, Height_Tag)) {
+            if (!parse_number(comment.substr(Height_Tag.size()), m_forced_height))
+                BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Height (" << comment << ").";
+            return;
+        }
+        // width tag
+        if (starts_with(comment, Width_Tag)) {
+            if (!parse_number(comment.substr(Width_Tag.size()), m_forced_width))
+                BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Width (" << comment << ").";
+            return;
+        }
+    }
+#else
     if ((!m_producers_enabled || m_producer == EProducer::PrusaSlicer) &&
         starts_with(comment, Height_Tag)) {
         // height tag
-        if (! parse_number(comment.substr(Height_Tag.size()), m_height))
+        if (!parse_number(comment.substr(Height_Tag.size()), m_height))
             BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Height (" << comment << ").";
         return;
     }
@@ -1045,6 +1098,7 @@ void GCodeProcessor::process_tags(const std::string_view comment)
         return;
     }
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
+#endif // ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
 
     // color change tag
     if (starts_with(comment, Color_Change_Tag)) {
@@ -1106,11 +1160,14 @@ bool GCodeProcessor::process_producers_tags(const std::string_view comment)
 {
     switch (m_producer)
     {
+    case EProducer::Slic3rPE:
+    case EProducer::Slic3r: 
     case EProducer::PrusaSlicer: { return process_prusaslicer_tags(comment); }
     case EProducer::Cura:        { return process_cura_tags(comment); }
     case EProducer::Simplify3D:  { return process_simplify3d_tags(comment); }
     case EProducer::CraftWare:   { return process_craftware_tags(comment); }
     case EProducer::ideaMaker:   { return process_ideamaker_tags(comment); }
+    case EProducer::KissSlicer:  { return process_kissslicer_tags(comment); }
     default:                     { return false; }
     }
 }
@@ -1177,6 +1234,14 @@ bool GCodeProcessor::process_cura_tags(const std::string_view comment)
         else
             BOOST_LOG_TRIVIAL(warning) << "GCodeProcessor found unknown flavor: " << flavor;
 
+        return true;
+    }
+
+    // layer
+    tag = "LAYER:";
+    pos = comment.find(tag);
+    if (pos != comment.npos) {
+        ++m_layer_id;
         return true;
     }
 
@@ -1264,9 +1329,35 @@ bool GCodeProcessor::process_simplify3d_tags(const std::string_view comment)
         return true;
     }
 
-#if ENABLE_GCODE_VIEWER_DATA_CHECKING
     // geometry
+#if ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
+    // ; tool
+    std::string tag = " tool";
+    pos = comment.find(tag);
+    if (pos == 0) {
+        const std::string_view data = comment.substr(pos + tag.length());
+        std::string h_tag = "H";
+        size_t h_start = data.find(h_tag);
+        size_t h_end = data.find_first_of(' ', h_start);
+        std::string w_tag = "W";
+        size_t w_start = data.find(w_tag);
+        size_t w_end = data.find_first_of(' ', w_start);
+        if (h_start != data.npos) {
+            if (!parse_number(data.substr(h_start + 1, (h_end != data.npos) ? h_end - h_start - 1 : h_end), m_forced_height))
+                BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Height (" << comment << ").";
+        }
+        if (w_start != data.npos) {
+            if (!parse_number(data.substr(w_start + 1, (w_end != data.npos) ? w_end - w_start - 1 : w_end), m_forced_width))
+                BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Width (" << comment << ").";
+        }
 
+        return true;
+    }
+
+    // ; layer
+    tag = " layer";
+#else
+#if ENABLE_GCODE_VIEWER_DATA_CHECKING
     // ; tool
     std::string tag = " tool";
     pos = comment.find(tag);
@@ -1290,6 +1381,20 @@ bool GCodeProcessor::process_simplify3d_tags(const std::string_view comment)
         return true;
     }
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
+
+    // ; layer
+    std::string tag = " layer";
+#endif // ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
+    pos = comment.find(tag);
+    if (pos == 0) {
+        // skip lines "; layer end"
+        const std::string_view data = comment.substr(pos + tag.length());
+        size_t end_start = data.find("end");
+        if (end_start == data.npos)
+            ++m_layer_id;
+
+        return true;
+    }
 
     return false;
 }
@@ -1331,6 +1436,13 @@ bool GCodeProcessor::process_craftware_tags(const std::string_view comment)
         return true;
     }
 
+    // layer
+    pos = comment.find(" Layer #");
+    if (pos == 0) {
+        ++m_layer_id;
+        return true;
+    }
+
     return false;
 }
 
@@ -1362,9 +1474,27 @@ bool GCodeProcessor::process_ideamaker_tags(const std::string_view comment)
         return true;
     }
 
-#if ENABLE_GCODE_VIEWER_DATA_CHECKING
     // geometry
+#if ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
+    // width
+    tag = "WIDTH:";
+    pos = comment.find(tag);
+    if (pos != comment.npos) {
+        if (!parse_number(comment.substr(pos + tag.length()), m_forced_width))
+            BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Width (" << comment << ").";
+        return true;
+    }
 
+    // height
+    tag = "HEIGHT:";
+    pos = comment.find(tag);
+    if (pos != comment.npos) {
+        if (!parse_number(comment.substr(pos + tag.length()), m_forced_height))
+            BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Height (" << comment << ").";
+        return true;
+    }
+#else
+#if ENABLE_GCODE_VIEWER_DATA_CHECKING
     // width
     tag = "WIDTH:";
     pos = comment.find(tag);
@@ -1383,6 +1513,121 @@ bool GCodeProcessor::process_ideamaker_tags(const std::string_view comment)
         return true;
     }
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
+#endif // ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
+
+    // layer
+    pos = comment.find("LAYER:");
+    if (pos == 0) {
+        ++m_layer_id;
+        return true;
+    }
+
+    return false;
+}
+
+bool GCodeProcessor::process_kissslicer_tags(const std::string_view comment)
+{
+    // extrusion roles
+
+    // ; 'Raft Path'
+    size_t pos = comment.find(" 'Raft Path'");
+    if (pos == 0) {
+        m_extrusion_role = erSkirt;
+        return true;
+    }
+
+    // ; 'Support Interface Path'
+    pos = comment.find(" 'Support Interface Path'");
+    if (pos == 0) {
+        m_extrusion_role = erSupportMaterialInterface;
+        return true;
+    }
+
+    // ; 'Travel/Ironing Path'
+    pos = comment.find(" 'Travel/Ironing Path'");
+    if (pos == 0) {
+        m_extrusion_role = erIroning;
+        return true;
+    }
+
+    // ; 'Support (may Stack) Path'
+    pos = comment.find(" 'Support (may Stack) Path'");
+    if (pos == 0) {
+        m_extrusion_role = erSupportMaterial;
+        return true;
+    }
+
+    // ; 'Perimeter Path'
+    pos = comment.find(" 'Perimeter Path'");
+    if (pos == 0) {
+        m_extrusion_role = erExternalPerimeter;
+        return true;
+    }
+
+    // ; 'Pillar Path'
+    pos = comment.find(" 'Pillar Path'");
+    if (pos == 0) {
+        m_extrusion_role = erNone; // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        return true;
+    }
+
+    // ; 'Destring/Wipe/Jump Path'
+    pos = comment.find(" 'Destring/Wipe/Jump Path'");
+    if (pos == 0) {
+        m_extrusion_role = erNone; // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        return true;
+    }
+
+    // ; 'Prime Pillar Path'
+    pos = comment.find(" 'Prime Pillar Path'");
+    if (pos == 0) {
+        m_extrusion_role = erNone; // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        return true;
+    }
+
+    // ; 'Loop Path'
+    pos = comment.find(" 'Loop Path'");
+    if (pos == 0) {
+        m_extrusion_role = erNone; // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        return true;
+    }
+
+    // ; 'Crown Path'
+    pos = comment.find(" 'Crown Path'");
+    if (pos == 0) {
+        m_extrusion_role = erNone; // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        return true;
+    }
+
+    // ; 'Solid Path'
+    pos = comment.find(" 'Solid Path'");
+    if (pos == 0) {
+        m_extrusion_role = erNone;
+        return true;
+    }
+
+    // ; 'Stacked Sparse Infill Path'
+    pos = comment.find(" 'Stacked Sparse Infill Path'");
+    if (pos == 0) {
+        m_extrusion_role = erInternalInfill;
+        return true;
+    }
+
+    // ; 'Sparse Infill Path'
+    pos = comment.find(" 'Sparse Infill Path'");
+    if (pos == 0) {
+        m_extrusion_role = erSolidInfill;
+        return true;
+    }
+
+    // geometry
+
+    // layer
+    pos = comment.find(" BEGIN_LAYER_");
+    if (pos == 0) {
+        ++m_layer_id;
+        return true;
+    }
 
     return false;
 }
@@ -1425,7 +1670,9 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
     auto move_type = [this](const AxisCoords& delta_pos) {
         EMoveType type = EMoveType::Noop;
 
-        if (delta_pos[E] < 0.0f)
+        if (m_wiping)
+            type = EMoveType::Wipe;
+        else if (delta_pos[E] < 0.0f)
             type = (delta_pos[X] != 0.0f || delta_pos[Y] != 0.0f || delta_pos[Z] != 0.0f) ? EMoveType::Travel : EMoveType::Retract;
         else if (delta_pos[E] > 0.0f) {
             if (delta_pos[X] == 0.0f && delta_pos[Y] == 0.0f)
@@ -1483,6 +1730,20 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
         m_mm3_per_mm_compare.update(area_toolpath_cross_section, m_extrusion_role);
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
 
+#if ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
+        if (m_forced_height > 0.0f)
+            m_height = m_forced_height;
+        else {
+            if (m_end_position[Z] > m_extruded_last_z + EPSILON) {
+                m_height = m_end_position[Z] - m_extruded_last_z;
+                m_extruded_last_z = m_end_position[Z];
+            }
+        }
+
+#if ENABLE_GCODE_VIEWER_DATA_CHECKING
+        m_height_compare.update(m_height, m_extrusion_role);
+#endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
+#else
         if ((m_producers_enabled && m_producer != EProducer::PrusaSlicer) || m_height == 0.0f) {
             if (m_end_position[Z] > m_extruded_last_z + EPSILON) {
                 m_height = m_end_position[Z] - m_extruded_last_z;
@@ -1492,10 +1753,17 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
                 m_extruded_last_z = m_end_position[Z];
             }
         }
+#endif // ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
 
+#if ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
+        if (m_forced_width > 0.0f)
+            m_width = m_forced_width;
+        else if (m_extrusion_role == erExternalPerimeter)
+#else
         if (m_extrusion_role == erExternalPerimeter)
+#endif // ENABLE_TOOLPATHS_WIDTH_HEIGHT_FROM_GCODE
             // cross section: rectangle
-            m_width = delta_pos[E] * static_cast<float>(M_PI * sqr(1.05 * filament_radius)) / (delta_xyz * m_height);
+            m_width = delta_pos[E] * static_cast<float>(M_PI * sqr(1.05f * filament_radius)) / (delta_xyz * m_height);
         else if (m_extrusion_role == erBridgeInfill || m_extrusion_role == erNone)
             // cross section: circle
             m_width = static_cast<float>(m_filament_diameters[m_extruder_id]) * std::sqrt(delta_pos[E] / delta_xyz);
@@ -1505,7 +1773,6 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
 
         // clamp width to avoid artifacts which may arise from wrong values of m_height
         m_width = std::min(m_width, 1.0f);
-//        m_width = std::min(m_width, 4.0f * m_height);
 
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
         m_width_compare.update(m_width, m_extrusion_role);

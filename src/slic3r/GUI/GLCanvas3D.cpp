@@ -31,6 +31,7 @@
 #include "Mouse3DController.hpp"
 #include "I18N.hpp"
 #include "NotificationManager.hpp"
+#include "format.hpp"
 
 #if ENABLE_RETINA_GL
 #include "slic3r/Utils/RetinaHelper.hpp"
@@ -636,9 +637,9 @@ void GLCanvas3D::WarningTexture::activate(WarningTexture::Warning warning, bool 
     auto &notification_manager = *wxGetApp().plater()->get_notification_manager();
     if (state) {
         if(error)
-            notification_manager.push_plater_error_notification(text,*(wxGetApp().plater()->get_current_canvas3D()));
+            notification_manager.push_plater_error_notification(text);
         else
-            notification_manager.push_plater_warning_notification(text, *(wxGetApp().plater()->get_current_canvas3D()));
+            notification_manager.push_plater_warning_notification(text);
     } else {
         if (error)
             notification_manager.close_plater_error_notification(text);
@@ -1078,7 +1079,11 @@ wxDEFINE_EVENT(EVT_GLCANVAS_MOUSE_DRAGGING_FINISHED, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_UPDATE_BED_SHAPE, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_TAB, SimpleEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_RESETGIZMOS, SimpleEvent);
+#if ENABLE_ARROW_KEYS_WITH_SLIDERS
+wxDEFINE_EVENT(EVT_GLCANVAS_MOVE_SLIDERS, wxKeyEvent);
+#else
 wxDEFINE_EVENT(EVT_GLCANVAS_MOVE_LAYERS_SLIDER, wxKeyEvent);
+#endif // ENABLE_ARROW_KEYS_WITH_SLIDERS
 wxDEFINE_EVENT(EVT_GLCANVAS_EDIT_COLOR_CHANGE, wxKeyEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_JUMP_TO, wxKeyEvent);
 wxDEFINE_EVENT(EVT_GLCANVAS_UNDO, SimpleEvent);
@@ -1091,23 +1096,48 @@ wxDEFINE_EVENT(EVT_GLCANVAS_RELOAD_FROM_DISK, SimpleEvent);
 
 const double GLCanvas3D::DefaultCameraZoomToBoxMarginFactor = 1.25;
 
-static GLCanvas3D::ArrangeSettings load_arrange_settings()
+void GLCanvas3D::load_arrange_settings()
 {
-    GLCanvas3D::ArrangeSettings settings;
+    std::string dist_fff_str =
+        wxGetApp().app_config->get("arrange", "min_object_distance_fff");
 
-    std::string dist_str =
-        wxGetApp().app_config->get("arrange", "min_object_distance");
+    std::string dist_fff_seq_print_str =
+        wxGetApp().app_config->get("arrange", "min_object_distance_fff_seq_print");
 
-    std::string en_rot_str =
-        wxGetApp().app_config->get("arrange", "enable_rotation");
+    std::string dist_sla_str =
+        wxGetApp().app_config->get("arrange", "min_object_distance_sla");
 
-    if (!dist_str.empty())
-        settings.distance = std::stof(dist_str);
+    std::string en_rot_fff_str =
+        wxGetApp().app_config->get("arrange", "enable_rotation_fff");
 
-    if (!en_rot_str.empty())
-        settings.enable_rotation = (en_rot_str == "1" || en_rot_str == "yes");
+    std::string en_rot_fff_seqp_str =
+        wxGetApp().app_config->get("arrange", "enable_rotation_fff_seq_print");
 
-    return settings;
+    std::string en_rot_sla_str =
+        wxGetApp().app_config->get("arrange", "enable_rotation_sla");
+
+    if (!dist_fff_str.empty())
+        m_arrange_settings_fff.distance = std::stof(dist_fff_str);
+
+    if (!dist_fff_seq_print_str.empty())
+        m_arrange_settings_fff_seq_print.distance = std::stof(dist_fff_seq_print_str);
+
+    if (!dist_sla_str.empty())
+        m_arrange_settings_sla.distance = std::stof(dist_sla_str);
+
+    if (!en_rot_fff_str.empty())
+        m_arrange_settings_fff.enable_rotation = (en_rot_fff_str == "1" || en_rot_fff_str == "yes");
+
+    if (!en_rot_fff_seqp_str.empty())
+        m_arrange_settings_fff_seq_print.enable_rotation = (en_rot_fff_seqp_str == "1" || en_rot_fff_seqp_str == "yes");
+
+    if (!en_rot_sla_str.empty())
+        m_arrange_settings_sla.enable_rotation = (en_rot_sla_str == "1" || en_rot_sla_str == "yes");
+}
+
+PrinterTechnology GLCanvas3D::current_printer_technology() const
+{
+    return m_process->current_printer_technology();
 }
 
 GLCanvas3D::GLCanvas3D(wxGLCanvas* canvas)
@@ -1152,7 +1182,7 @@ GLCanvas3D::GLCanvas3D(wxGLCanvas* canvas)
 #endif // ENABLE_RETINA_GL
     }
 
-    m_arrange_settings = load_arrange_settings();
+    load_arrange_settings();
 
     m_selection.set_volumes(&m_volumes.volumes);
 }
@@ -1646,21 +1676,27 @@ void GLCanvas3D::render()
     _render_overlays();
 
 #if ENABLE_RENDER_STATISTICS
-    ImGuiWrapper& imgui = *wxGetApp().imgui();
-    imgui.begin(std::string("Render statistics"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
-    imgui.text("Last frame: ");
-    ImGui::SameLine();
-    imgui.text(std::to_string(m_render_stats.last_frame));
-    ImGui::SameLine();
-    imgui.text("  ms");
-    ImGui::Separator();
-    imgui.text("Compressed textures: ");
-    ImGui::SameLine();
-    imgui.text(OpenGLManager::are_compressed_textures_supported() ? "supported" : "not supported");
-    imgui.text("Max texture size: ");
-    ImGui::SameLine();
-    imgui.text(std::to_string(OpenGLManager::get_gl_info().get_max_tex_size()));
-    imgui.end();
+    if (wxGetApp().plater()->is_render_statistic_dialog_visible()) {
+        ImGuiWrapper& imgui = *wxGetApp().imgui();
+        imgui.begin(std::string("Render statistics"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+        imgui.text("Last frame:");
+        ImGui::SameLine();
+        long long average = m_render_stats.get_average();
+        imgui.text(std::to_string(average));
+        ImGui::SameLine();
+        imgui.text("ms");
+        imgui.text("FPS:");
+        ImGui::SameLine();
+        imgui.text(std::to_string((average == 0) ? 0 : static_cast<int>(1000.0f / static_cast<float>(average))));
+        ImGui::Separator();
+        imgui.text("Compressed textures:");
+        ImGui::SameLine();
+        imgui.text(OpenGLManager::are_compressed_textures_supported() ? "supported" : "not supported");
+        imgui.text("Max texture size:");
+        ImGui::SameLine();
+        imgui.text(std::to_string(OpenGLManager::get_gl_info().get_max_tex_size()));
+        imgui.end();
+    }
 #endif // ENABLE_RENDER_STATISTICS
 
 #if ENABLE_CAMERA_STATISTICS
@@ -1668,8 +1704,6 @@ void GLCanvas3D::render()
 #endif // ENABLE_CAMERA_STATISTICS
 
     std::string tooltip;
-
-	
 
 	// Negative coordinate means out of the window, likely because the window was deactivated.
 	// In that case the tooltip should be hidden.
@@ -1699,8 +1733,7 @@ void GLCanvas3D::render()
         m_tooltip.render(m_mouse.position, *this);
 
     wxGetApp().plater()->get_mouse3d_controller().render_settings_dialog(*this);
-	
-	wxGetApp().plater()->get_notification_manager()->render_notifications(*this, get_overlay_window_width());
+    wxGetApp().plater()->get_notification_manager()->render_notifications(get_overlay_window_width());
 
     wxGetApp().imgui()->render();
 
@@ -1708,7 +1741,7 @@ void GLCanvas3D::render()
 
 #if ENABLE_RENDER_STATISTICS
     auto end_time = std::chrono::high_resolution_clock::now();
-    m_render_stats.last_frame = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+    m_render_stats.add_frame(std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
 #endif // ENABLE_RENDER_STATISTICS
 }
 
@@ -2355,6 +2388,14 @@ void GLCanvas3D::on_idle(wxIdleEvent& evt)
     if (!m_initialized)
         return;
 
+#if ENABLE_NEW_NOTIFICATIONS_FADE_OUT 
+    NotificationManager* notification_mgr = wxGetApp().plater()->get_notification_manager();
+    if (notification_mgr->requires_update())
+        notification_mgr->update_notifications();
+
+    m_dirty |= notification_mgr->requires_render();
+#endif // ENABLE_NEW_NOTIFICATIONS_FADE_OUT 
+
     m_dirty |= m_main_toolbar.update_items_state();
     m_dirty |= m_undoredo_toolbar.update_items_state();
     m_dirty |= wxGetApp().plater()->get_view_toolbar().update_items_state();
@@ -2362,12 +2403,24 @@ void GLCanvas3D::on_idle(wxIdleEvent& evt)
     bool mouse3d_controller_applied = wxGetApp().plater()->get_mouse3d_controller().apply(wxGetApp().plater()->get_camera());
     m_dirty |= mouse3d_controller_applied;
 
+#if ENABLE_NEW_NOTIFICATIONS_FADE_OUT 
+    if (!m_dirty) {
+        if (notification_mgr->requires_update())
+            evt.RequestMore();
+        return;
+    }
+#else
     if (!m_dirty)
         return;
+#endif // ENABLE_NEW_NOTIFICATIONS_FADE_OUT 
 
     _refresh_if_shown_on_screen();
 
+#if ENABLE_NEW_NOTIFICATIONS_FADE_OUT 
+    if (m_extra_frame_requested || mouse3d_controller_applied || notification_mgr->requires_update()) {
+#else
     if (m_extra_frame_requested || mouse3d_controller_applied) {
+#endif // ENABLE_NEW_NOTIFICATIONS_FADE_OUT 
         m_dirty = true;
         m_extra_frame_requested = false;
         evt.RequestMore();
@@ -2409,10 +2462,12 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
         post_event(SimpleEvent(EVT_GLCANVAS_ARRANGE));
     };
 
-//#ifdef __APPLE__
-//    ctrlMask |= wxMOD_RAW_CONTROL;
-//#endif /* __APPLE__ */
+    auto action_question_mark = [this]() {
+        post_event(SimpleEvent(EVT_GLCANVAS_QUESTION_MARK));
+    };
+
     if ((evt.GetModifiers() & ctrlMask) != 0) {
+        // CTRL is pressed
         switch (keyCode) {
 #ifdef __APPLE__
         case 'a':
@@ -2432,11 +2487,22 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
         break;
 
 #if ENABLE_CTRL_M_ON_WINDOWS
+#ifdef __APPLE__
+        case 'm':
+        case 'M':
+#else /* __APPLE__ */
         case WXK_CONTROL_M:
+#endif /* __APPLE__ */
         {
-            Mouse3DController& controller = wxGetApp().plater()->get_mouse3d_controller();
-            controller.show_settings_dialog(!controller.is_settings_dialog_shown());
-            m_dirty = true;
+#ifdef _WIN32
+            if (wxGetApp().app_config->get("use_legacy_3DConnexion") == "1") {
+#endif //_WIN32
+                Mouse3DController& controller = wxGetApp().plater()->get_mouse3d_controller();
+                controller.show_settings_dialog(!controller.is_settings_dialog_shown());
+                m_dirty = true;
+#ifdef _WIN32
+            }
+#endif //_WIN32
             break;
         }
 #else
@@ -2491,10 +2557,11 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
         case WXK_BACK:
         case WXK_DELETE:
              post_event(SimpleEvent(EVT_GLTOOLBAR_DELETE_ALL)); break;
-		default:            evt.Skip();
+        default:            evt.Skip();
         }
     }
-    else  if ((evt.GetModifiers() & shiftMask) != 0) {
+    else if ((evt.GetModifiers() & shiftMask) != 0) {
+        // SHIFT is pressed
         switch (keyCode) {
         case '+': { action_plus(evt); break; }
         case 'A':
@@ -2505,6 +2572,7 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
                 post_event(wxKeyEvent(EVT_GLCANVAS_JUMP_TO, evt));
             break;
         }
+        case '?': { action_question_mark(); break; }
         default:
             evt.Skip();
         }
@@ -2518,7 +2586,13 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
                   post_event(SimpleEvent(EVT_GLTOOLBAR_DELETE));
                   break;
         case WXK_ESCAPE: { deselect_all(); break; }
-        case WXK_F5: { post_event(SimpleEvent(EVT_GLCANVAS_RELOAD_FROM_DISK)); break; }
+        case WXK_F5:
+        {
+            if ((wxGetApp().is_editor() && !wxGetApp().plater()->model().objects.empty()) ||
+                (wxGetApp().is_gcode_viewer() && !wxGetApp().plater()->get_last_loaded_gcode().empty()))
+                post_event(SimpleEvent(EVT_GLCANVAS_RELOAD_FROM_DISK));
+            break;
+        }
         case '0': { select_view("iso"); break; }
         case '1': { select_view("top"); break; }
         case '2': { select_view("bottom"); break; }
@@ -2533,7 +2607,7 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
                     else
                         post_event(Event<int>(EVT_GLCANVAS_INCREASE_INSTANCES, -1)); 
                     break; }
-        case '?': { post_event(SimpleEvent(EVT_GLCANVAS_QUESTION_MARK)); break; }
+        case '?': { action_question_mark(); break; }
         case 'A':
         case 'a': { action_a(); break; }
         case 'B':
@@ -2712,7 +2786,15 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
     {
         if (!m_gizmos.on_key(evt)) {
             if (evt.GetEventType() == wxEVT_KEY_UP) {
+#if ENABLE_RENDER_STATISTICS
+                if (evt.ShiftDown() && evt.ControlDown() && keyCode == WXK_SPACE) {
+                    wxGetApp().plater()->toggle_render_statistic_dialog();
+                    m_dirty = true;
+                }
                 if (m_tab_down && keyCode == WXK_TAB && !evt.HasAnyModifiers()) {
+#else
+                if (m_tab_down && keyCode == WXK_TAB && !evt.HasAnyModifiers()) {
+#endif // ENABLE_RENDER_STATISTICS
                     // Enable switching between 3D and Preview with Tab
                     // m_canvas->HandleAsNavigationKey(evt);   // XXX: Doesn't work in some cases / on Linux
                     post_event(SimpleEvent(EVT_GLCANVAS_TAB));
@@ -2812,7 +2894,11 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
                         keyCode == WXK_UP ||
                         keyCode == WXK_DOWN) {
                         if (dynamic_cast<Preview*>(m_canvas->GetParent()) != nullptr)
+#if ENABLE_ARROW_KEYS_WITH_SLIDERS
+                            post_event(wxKeyEvent(EVT_GLCANVAS_MOVE_SLIDERS, evt));
+#else
                             post_event(wxKeyEvent(EVT_GLCANVAS_MOVE_LAYERS_SLIDER, evt));
+#endif // ENABLE_ARROW_KEYS_WITH_SLIDERS
                     }
                 }
             }
@@ -3313,9 +3399,13 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             const float factor = m_retina_helper->get_scale_factor();
             logical_pos = logical_pos.cwiseQuotient(Vec2d(factor, factor));
 #endif // ENABLE_RETINA_GL
-            if (!m_mouse.dragging)
+            if (!m_mouse.dragging) {
                 // do not post the event if the user is panning the scene
-                post_event(RBtnEvent(EVT_GLCANVAS_RIGHT_CLICK, { logical_pos, m_hover_volume_idxs.empty() }));
+                // or if right click was done over the wipe tower
+                bool post_right_click_event = m_hover_volume_idxs.empty() || !m_volumes.volumes[get_first_hover_volume_idx()]->is_wipe_tower;
+                if (post_right_click_event)
+                    post_event(RBtnEvent(EVT_GLCANVAS_RIGHT_CLICK, { logical_pos, m_hover_volume_idxs.empty() }));
+            }
         }
 
         mouse_up_cleanup();
@@ -3690,7 +3780,7 @@ GLCanvas3D::WipeTowerInfo GLCanvas3D::get_wipe_tower_info() const
                             m_config->opt_float("wipe_tower_y"));
             wti.m_rotation = (M_PI/180.) * m_config->opt_float("wipe_tower_rotation_angle");
             const BoundingBoxf3& bb = vol->bounding_box();
-            wti.m_bb_size = Vec2d(bb.size().x(), bb.size().y());
+            wti.m_bb = BoundingBoxf{to_2d(bb.min), to_2d(bb.max)};
             break;
         }
     }
@@ -3876,38 +3966,64 @@ bool GLCanvas3D::_render_arrange_menu(float pos_x)
     const float x = pos_x * float(wxGetApp().plater()->get_camera().get_zoom()) + 0.5f * canvas_w;
     imgui->set_next_window_pos(x, m_main_toolbar.get_height(), ImGuiCond_Always, 0.5f, 0.0f);
 
-    imgui->begin(_(L("Arrange options")), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
-    ArrangeSettings settings = m_arrange_settings;
+    imgui->begin(_L("Arrange options"), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+
+    ArrangeSettings settings = get_arrange_settings();
+    ArrangeSettings &settings_out = get_arrange_settings();
 
     auto &appcfg = wxGetApp().app_config;
+    PrinterTechnology ptech = m_process->current_printer_technology();
 
     bool settings_changed = false;
+    float dist_min = 0.f;
+    std::string dist_key = "min_object_distance", rot_key = "enable_rotation";
+    std::string postfix;
 
-    if (imgui->slider_float(_(L("Gap size")), &settings.distance, 0.f, 100.f)) {
-        m_arrange_settings.distance = settings.distance;
+    if (ptech == ptSLA) {
+        dist_min     = 0.f;
+        postfix      = "_sla";
+    } else if (ptech == ptFFF) {
+        auto co_opt = m_config->option<ConfigOptionBool>("complete_objects");
+        if (co_opt && co_opt->value) {
+            dist_min     = float(min_object_distance(*m_config));
+            postfix      = "_fff_seq_print";
+        } else {
+            dist_min     = 0.f;
+            postfix     = "_fff";
+        }
+    }
+
+    dist_key += postfix;
+    rot_key  += postfix;
+
+    imgui->text(GUI::format_wxstr(_L("Use %1%left mouse key to enter text edit mode:"), shortkey_ctrl_prefix()));
+
+    if (imgui->slider_float(_L("Spacing"), &settings.distance, dist_min, 100.0f, "%5.2f") || dist_min > settings.distance) {
+        settings.distance = std::max(dist_min, settings.distance);
+        settings_out.distance = settings.distance;
+        appcfg->set("arrange", dist_key.c_str(), std::to_string(settings_out.distance));
         settings_changed = true;
     }
 
-    if (imgui->checkbox(_(L("Enable rotations")), settings.enable_rotation)) {
-        m_arrange_settings.enable_rotation = settings.enable_rotation;
+    if (imgui->checkbox(_L("Enable rotations (slow)"), settings.enable_rotation)) {
+        settings_out.enable_rotation = settings.enable_rotation;
+        appcfg->set("arrange", rot_key.c_str(), settings_out.enable_rotation? "1" : "0");
         settings_changed = true;
     }
 
     ImGui::Separator();
 
-    if (imgui->button(_(L("Reset")))) {
-        m_arrange_settings = ArrangeSettings{};
+    if (imgui->button(_L("Reset"))) {
+        settings_out = ArrangeSettings{};
+        settings_out.distance = std::max(dist_min, settings_out.distance);
+        appcfg->set("arrange", dist_key.c_str(), std::to_string(settings_out.distance));
+        appcfg->set("arrange", rot_key.c_str(), settings_out.enable_rotation? "1" : "0");
         settings_changed = true;
-    }
-
-    if (settings_changed) {
-        appcfg->set("arrange", "min_object_distance", std::to_string(m_arrange_settings.distance));
-        appcfg->set("arrange", "enable_rotation", m_arrange_settings.enable_rotation? "1" : "0");
     }
 
     ImGui::SameLine();
 
-    if (imgui->button(_(L("Arrange")))) {
+    if (imgui->button(_L("Arrange"))) {
         wxGetApp().plater()->arrange();
     }
 
@@ -4896,7 +5012,7 @@ void GLCanvas3D::_render_objects() const
 
         if (m_config != nullptr) {
             const BoundingBoxf3& bed_bb = wxGetApp().plater()->get_bed().get_bounding_box(false);
-            m_volumes.set_print_box((float)bed_bb.min(0), (float)bed_bb.min(1), 0.0f, (float)bed_bb.max(0), (float)bed_bb.max(1), (float)m_config->opt_float("max_print_height"));
+            m_volumes.set_print_box((float)bed_bb.min(0) - BedEpsilon, (float)bed_bb.min(1) - BedEpsilon, 0.0f, (float)bed_bb.max(0) + BedEpsilon, (float)bed_bb.max(1) + BedEpsilon, (float)m_config->opt_float("max_print_height"));
             m_volumes.check_outside_state(m_config, nullptr);
         }
     }

@@ -86,7 +86,7 @@ class SplashScreen : public wxSplashScreen
 {
 public:
     SplashScreen(const wxBitmap& bitmap, long splashStyle, int milliseconds, wxPoint pos = wxDefaultPosition)
-        : wxSplashScreen(bitmap, splashStyle, milliseconds, (wxWindow*)wxGetApp().mainframe, wxID_ANY, wxDefaultPosition, wxDefaultSize, 
+        : wxSplashScreen(bitmap, splashStyle, milliseconds, static_cast<wxWindow*>(wxGetApp().mainframe), wxID_ANY, wxDefaultPosition, wxDefaultSize,
 #ifdef __APPLE__
             wxSIMPLE_BORDER | wxFRAME_NO_TASKBAR | wxSTAY_ON_TOP
 #else
@@ -542,7 +542,6 @@ static void register_win32_device_notification_event()
     });
 
 	wxWindow::MSWRegisterMessageHandler(WM_COPYDATA, [](wxWindow* win, WXUINT /* nMsg */, WXWPARAM wParam, WXLPARAM lParam) {
-
 		COPYDATASTRUCT* copy_data_structure = { 0 };
 		copy_data_structure = (COPYDATASTRUCT*)lParam;
 		if (copy_data_structure->dwData == 1) {
@@ -664,8 +663,8 @@ bool GUI_App::init_opengl()
 void GUI_App::init_app_config()
 {
 	// Profiles for the alpha are stored into the PrusaSlicer-alpha directory to not mix with the current release.
-	SetAppName(SLIC3R_APP_KEY);
-	SetAppName(SLIC3R_APP_KEY "-alpha");
+//	SetAppName(SLIC3R_APP_KEY);
+	SetAppName(SLIC3R_APP_KEY "-beta");
 //	SetAppDisplayName(SLIC3R_APP_NAME);
 
 	// Set the Slic3r data directory at the Slic3r XS module.
@@ -805,7 +804,14 @@ bool GUI_App::on_init_inner()
 
     if (is_editor()) {
 #ifdef __WXMSW__ 
-        associate_3mf_files();
+#if ENABLE_CUSTOMIZABLE_FILES_ASSOCIATION_ON_WIN
+        if (app_config->get("associate_3mf") == "1")
+#endif // ENABLE_CUSTOMIZABLE_FILES_ASSOCIATION_ON_WIN
+            associate_3mf_files();
+#if ENABLE_CUSTOMIZABLE_FILES_ASSOCIATION_ON_WIN
+        if (app_config->get("associate_stl") == "1")
+            associate_stl_files();
+#endif // ENABLE_CUSTOMIZABLE_FILES_ASSOCIATION_ON_WIN
 #endif // __WXMSW__
 
         preset_updater = new PresetUpdater();
@@ -814,14 +820,17 @@ bool GUI_App::on_init_inner()
             app_config->save();
             if (this->plater_ != nullptr) {
                 if (*Semver::parse(SLIC3R_VERSION) < *Semver::parse(into_u8(evt.GetString()))) {
-                    this->plater_->get_notification_manager()->push_notification(NotificationType::NewAppAvailable, *(this->plater_->get_current_canvas3D()));
+                    this->plater_->get_notification_manager()->push_notification(NotificationType::NewAppAvailable);
                 }
             }
             });
     }
     else {
 #ifdef __WXMSW__ 
-        associate_gcode_files();
+#if ENABLE_CUSTOMIZABLE_FILES_ASSOCIATION_ON_WIN
+        if (app_config->get("associate_gcode") == "1")
+#endif // ENABLE_CUSTOMIZABLE_FILES_ASSOCIATION_ON_WIN
+            associate_gcode_files();
 #endif // __WXMSW__
     }
 
@@ -924,13 +933,7 @@ bool GUI_App::on_init_inner()
         load_current_presets();
     mainframe->Show(true);
 
-    /* Temporary workaround for the correct behavior of the Scrolled sidebar panel:
-     * change min hight of object list to the normal min value (15 * wxGetApp().em_unit()) 
-     * after first whole Mainframe updating/layouting
-     */
-    const int list_min_height = 15 * em_unit();
-    if (obj_list()->GetMinSize().GetY() > list_min_height)
-        obj_list()->SetMinSize(wxSize(-1, list_min_height));
+    obj_list()->set_min_height();
 
     update_mode(); // update view mode after fix of the object_list size
 
@@ -1141,13 +1144,8 @@ void GUI_App::recreate_GUI(const wxString& msg_name)
     mainframe->Show(true);
 
     dlg.Update(90, _L("Loading of a mode view") + dots);
-    /* Temporary workaround for the correct behavior of the Scrolled sidebar panel:
-    * change min hight of object list to the normal min value (15 * wxGetApp().em_unit())
-    * after first whole Mainframe updating/layouting
-    */
-    const int list_min_height = 15 * em_unit();
-    if (obj_list()->GetMinSize().GetY() > list_min_height)
-        obj_list()->SetMinSize(wxSize(-1, list_min_height));
+
+    obj_list()->set_min_height();
     update_mode();
 
     // #ys_FIXME_delete_after_testing  Do we still need this  ?
@@ -1269,6 +1267,16 @@ bool GUI_App::select_language()
 	wxArrayString translations = wxTranslations::Get()->GetAvailableTranslations(SLIC3R_APP_KEY);
     std::vector<const wxLanguageInfo*> language_infos;
     language_infos.emplace_back(wxLocale::GetLanguageInfo(wxLANGUAGE_ENGLISH));
+#ifdef __linux__
+    // wxWidgets consider the default English locale to be en_GB, which is often missing on Linux.
+    // Thus we offer en_US on Linux as well.
+    language_infos.emplace_back(wxLocale::GetLanguageInfo(wxLANGUAGE_ENGLISH_US));
+    //FIXME https://github.com/prusa3d/PrusaSlicer/issues/2580#issuecomment-524546743
+    // In a correctly set up system, "locale -a" will get all the installed locales on that system.
+    // According to the installed locales, the locales for the dictionaries may be modified with the available
+    // CanonicalName of the locale, possibly duplicating the entries for each CanonicalName of the dictionary.
+    // Other languages with missing locales of the system can be greyed out or not shown at all.
+#endif // __linux__
     for (size_t i = 0; i < translations.GetCount(); ++ i) {
 	    const wxLanguageInfo *langinfo = wxLocale::FindLanguageInfo(translations[i]);
         if (langinfo != nullptr)
@@ -1297,6 +1305,13 @@ bool GUI_App::select_language()
         if (language_infos[i]->CanonicalName.BeforeFirst('_') == "en")
         	// This will be the default selection if the active language does not match any dictionary.
         	init_selection_default = i;
+#ifdef __linux__
+        // wxWidgets consider the default English locale to be en_GB, which is often missing on Linux.
+        // Thus we make the distintion between "en_US" and "en_GB" clear.
+        if (language_infos[i]->CanonicalName == "en_GB" && language_infos[i]->Description == "English")
+            names.Add("English (U.K.)");
+        else
+#endif // __linux__
         names.Add(language_infos[i]->Description);
     }
     if (init_selection == -1)
@@ -1556,13 +1571,16 @@ void GUI_App::add_config_menu(wxMenuBar *menu)
                 ConfigSnapshotDialog dlg(Slic3r::GUI::Config::SnapshotDB::singleton(), on_snapshot);
                 dlg.ShowModal();
                 if (!dlg.snapshot_to_activate().empty()) {
-                    if (!Config::SnapshotDB::singleton().is_on_snapshot(*app_config))
+                    if (! Config::SnapshotDB::singleton().is_on_snapshot(*app_config))
                         Config::SnapshotDB::singleton().take_snapshot(*app_config, Config::Snapshot::SNAPSHOT_BEFORE_ROLLBACK);
-                    app_config->set("on_snapshot",
-                        Config::SnapshotDB::singleton().restore_snapshot(dlg.snapshot_to_activate(), *app_config).id);
-                    preset_bundle->load_presets(*app_config);
-                    // Load the currently selected preset into the GUI, update the preset selection box.
-                    load_current_presets();
+                    try {
+                        app_config->set("on_snapshot", Config::SnapshotDB::singleton().restore_snapshot(dlg.snapshot_to_activate(), *app_config).id);
+                        preset_bundle->load_presets(*app_config);
+                        // Load the currently selected preset into the GUI, update the preset selection box.
+                        load_current_presets();
+                    } catch (std::exception &ex) {
+                        GUI::show_error(nullptr, _L("Failed to activate configuration snapshot.") + "\n" + into_u8(ex.what()));
+                    }
                 }
             }
             break;
@@ -1578,6 +1596,20 @@ void GUI_App::add_config_menu(wxMenuBar *menu)
                 app_layout_changed = dlg.settings_layout_changed();
                 if (dlg.seq_top_layer_only_changed())
                     this->plater_->refresh_print();
+#if ENABLE_CUSTOMIZABLE_FILES_ASSOCIATION_ON_WIN
+#ifdef _WIN32
+                if (is_editor()) {
+                    if (app_config->get("associate_3mf") == "1")
+                        associate_3mf_files();
+                    if (app_config->get("associate_stl") == "1")
+                        associate_stl_files();
+                }
+                else {
+                    if (app_config->get("associate_gcode") == "1")
+                        associate_gcode_files();
+                }
+#endif // _WIN32
+#endif // ENABLE_CUSTOMIZABLE_FILES_ASSOCIATION_ON_WIN
             }
             if (app_layout_changed) {
                 // hide full main_sizer for mainFrame
@@ -1675,11 +1707,12 @@ bool GUI_App::checked_tab(Tab* tab)
 }
 
 // Update UI / Tabs to reflect changes in the currently loaded presets
-void GUI_App::load_current_presets()
+void GUI_App::load_current_presets(bool check_printer_presets_ /*= true*/)
 {
     // check printer_presets for the containing information about "Print Host upload"
     // and create physical printer from it, if any exists
-    check_printer_presets();
+    if (check_printer_presets_)
+        check_printer_presets();
 
     PrinterTechnology printer_technology = preset_bundle->printers.get_edited_preset().printer_technology();
 	this->plater()->set_printer_technology(printer_technology);
@@ -1748,8 +1781,17 @@ void GUI_App::MacOpenFiles(const wxArrayString &fileNames)
         if (!non_gcode_files.empty()) 
             start_new_slicer(non_gcode_files, true);
     } else {
-        if (! files.empty())
+        if (! files.empty()) {
+#if ENABLE_DRAG_AND_DROP_FIX
+            wxArrayString input_files;
+            for (size_t i = 0; i < non_gcode_files.size(); ++i) {
+                input_files.push_back(non_gcode_files[i]);
+            }
+            this->plater()->load_files(input_files);
+#else
             this->plater()->load_files(files, true, true);
+#endif     
+        }
         for (const wxString &filename : gcode_files)
             start_new_gcodeviewer(&filename);
     }
@@ -1828,6 +1870,7 @@ wxString GUI_App::current_language_code_safe() const
 		{ "pl", 	"pl_PL", },
 		{ "uk", 	"uk_UA", },
 		{ "zh", 	"zh_CN", },
+		{ "ru", 	"ru_RU", },
 	};
 	wxString language_code = this->current_language_code().BeforeFirst('_');
 	auto it = mapping.find(language_code);
@@ -2112,6 +2155,32 @@ void GUI_App::associate_3mf_files()
         // notify Windows only when any of the values gets changed
         ::SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 }
+
+#if ENABLE_CUSTOMIZABLE_FILES_ASSOCIATION_ON_WIN
+void GUI_App::associate_stl_files()
+{
+    wchar_t app_path[MAX_PATH];
+    ::GetModuleFileNameW(nullptr, app_path, sizeof(app_path));
+
+    std::wstring prog_path = L"\"" + std::wstring(app_path) + L"\"";
+    std::wstring prog_id = L"Prusa.Slicer.1";
+    std::wstring prog_desc = L"PrusaSlicer";
+    std::wstring prog_command = prog_path + L" \"%1\"";
+    std::wstring reg_base = L"Software\\Classes";
+    std::wstring reg_extension = reg_base + L"\\.stl";
+    std::wstring reg_prog_id = reg_base + L"\\" + prog_id;
+    std::wstring reg_prog_id_command = reg_prog_id + L"\\Shell\\Open\\Command";
+
+    bool is_new = false;
+    is_new |= set_into_win_registry(HKEY_CURRENT_USER, reg_extension.c_str(), prog_id.c_str());
+    is_new |= set_into_win_registry(HKEY_CURRENT_USER, reg_prog_id.c_str(), prog_desc.c_str());
+    is_new |= set_into_win_registry(HKEY_CURRENT_USER, reg_prog_id_command.c_str(), prog_command.c_str());
+
+    if (is_new)
+        // notify Windows only when any of the values gets changed
+        ::SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+}
+#endif // ENABLE_CUSTOMIZABLE_FILES_ASSOCIATION_ON_WIN
 
 void GUI_App::associate_gcode_files()
 {
