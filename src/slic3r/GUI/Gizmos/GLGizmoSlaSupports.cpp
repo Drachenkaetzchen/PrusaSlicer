@@ -905,7 +905,7 @@ void GLGizmoSlaSupports::on_set_state()
     if (m_state == Off && m_old_state != Off) { // the gizmo was just turned Off
         bool will_ask = m_editing_mode && unsaved_changes();
         if (will_ask) {
-            wxGetApp().CallAfter([this]() {
+            /*wxGetApp().CallAfter([this]() */{
                 // Following is called through CallAfter, because otherwise there was a problem
                 // on OSX with the wxMessageDialog being shown several times when clicked into.
                 wxMessageDialog dlg(GUI::wxGetApp().mainframe, _(L("Do you want to save your manually "
@@ -914,11 +914,11 @@ void GLGizmoSlaSupports::on_set_state()
                         editing_mode_apply_changes();
                     else
                         editing_mode_discard_changes();
-            });
+            }//);
             // refuse to be turned off so the gizmo is active when the CallAfter is executed
-            m_state = m_old_state;
+            //m_state = m_old_state;
         }
-        else {
+        /*else*/ {
             // we are actually shutting down
             disable_editing_mode(); // so it is not active next time the gizmo opens
             Plater::TakeSnapshot snapshot(wxGetApp().plater(), _(L("SLA gizmo turned off")));
