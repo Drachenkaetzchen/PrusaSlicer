@@ -35,7 +35,7 @@ static SettingsBundle FREQ_SETTINGS_BUNDLE_FFF =
     { L("Layers and Perimeters"), { "layer_height" , "perimeters", "top_solid_layers", "bottom_solid_layers" } },
     { L("Infill")               , { "fill_density", "fill_pattern" } },
     { L("Support material")     , { "support_material", "support_material_auto", "support_material_threshold", 
-                                    "support_material_pattern", "support_material_buildplate_only",
+                                    "support_material_pattern", "support_material_interface_pattern", "support_material_buildplate_only",
                                     "support_material_spacing" } },
     { L("Wipe options")            , { "wipe_into_infill", "wipe_into_objects" } }
 };
@@ -73,7 +73,7 @@ static DynamicPrintConfig& printer_config()
 
 static int extruders_count()
 {
-    return wxGetApp().extruders_cnt();
+    return wxGetApp().extruders_edited_cnt();
 }
 
 static void take_snapshot(const wxString& snapshot_name) 
@@ -93,6 +93,7 @@ ObjectList::ObjectList(wxWindow* parent) :
         CATEGORY_ICON[L("Layers and Perimeters")]    = create_scaled_bitmap("layers");
         CATEGORY_ICON[L("Infill")]                   = create_scaled_bitmap("infill");
         CATEGORY_ICON[L("Ironing")]                  = create_scaled_bitmap("ironing");
+        CATEGORY_ICON[L("Fuzzy Skin")]               = create_scaled_bitmap("fuzzy_skin");
         CATEGORY_ICON[L("Support material")]         = create_scaled_bitmap("support");
         CATEGORY_ICON[L("Speed")]                    = create_scaled_bitmap("time");
         CATEGORY_ICON[L("Extruders")]                = create_scaled_bitmap("funnel");
@@ -2487,6 +2488,13 @@ bool ObjectList::del_subobject_from_object(const int obj_idx, const int idx, con
             if (!last_volume->config.empty()) {
                 object->config.apply(last_volume->config);
                 last_volume->config.clear();
+
+                // update extruder color in ObjectList
+                wxDataViewItem obj_item = m_objects_model->GetItemById(obj_idx);
+                if (obj_item) {
+                    wxString extruder = object->config.has("extruder") ? wxString::Format("%d", object->config.extruder()) : _L("default");
+                    m_objects_model->SetExtruder(extruder, obj_item);
+                }
             }
         }
     }

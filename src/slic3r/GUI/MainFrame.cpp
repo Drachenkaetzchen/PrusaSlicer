@@ -548,18 +548,10 @@ void MainFrame::init_tabpanel()
     m_tabpanel->Bind(wxEVT_NOTEBOOK_PAGE_CHANGING, [this](wxBookCtrlEvent& evt) {
         wxWindow* panel = m_tabpanel->GetCurrentPage();
         if (panel != nullptr) {
-            TabPrinter* printer_tab = dynamic_cast<TabPrinter*>(panel);
-            if (printer_tab != nullptr) {
-                if (!printer_tab->validate_custom_gcodes())
+            Tab* tab = dynamic_cast<Tab*>(panel);
+            if (tab && (tab->type() == Preset::TYPE_FILAMENT || tab->type() == Preset::TYPE_PRINTER))
+                if (!tab->validate_custom_gcodes())
                     evt.Veto();
-                return;
-            }
-            TabFilament* filament_tab = dynamic_cast<TabFilament*>(panel);
-            if (filament_tab != nullptr) {
-                if (!filament_tab->validate_custom_gcodes())
-                    evt.Veto();
-                return;
-            }
         }
         });
 #endif // ENABLE_VALIDATE_CUSTOM_GCODE
@@ -811,11 +803,7 @@ bool MainFrame::can_reslice() const
 
 void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
 {
-#if ENABLE_WX_3_1_3_DPI_CHANGED_EVENT
     wxGetApp().update_fonts(this);
-#else
-    wxGetApp().update_fonts();
-#endif // ENABLE_WX_3_1_3_DPI_CHANGED_EVENT
     this->SetFont(this->normal_font());
 
     // update Plater
@@ -1856,14 +1844,14 @@ SettingsDialog::SettingsDialog(MainFrame* mainframe)
     if (wxGetApp().is_gcode_viewer())
         return;
 
-#if ENABLE_WX_3_1_3_DPI_CHANGED_EVENT && defined(__WXMSW__)
+#if defined(__WXMSW__)
     // ys_FIXME! temporary workaround for correct font scaling
     // Because of from wxWidgets 3.1.3 auto rescaling is implemented for the Fonts,
     // From the very beginning set dialog font to the wxSYS_DEFAULT_GUI_FONT
     this->SetFont(wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT));
 #else
     this->SetFont(wxGetApp().normal_font());
-#endif // ENABLE_WX_3_1_3_DPI_CHANGED_EVENT
+#endif // __WXMSW__
     this->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
 
     // Load the icon either from the exe, or from the ico file.
